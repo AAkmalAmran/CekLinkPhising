@@ -3,24 +3,44 @@ from app.database import db
 from app.models import ScannedURL
 from app.services.virustotal_api import check_url_with_virustotal
 from app.services.google_safe_browsing_api import check_url_with_google_safe_browsing
+from app.services.urlscan_api import check_url_with_urlscan
 from datetime import datetime, timezone
+import concurrent.futures
 
 scan_bp = Blueprint('scan', __name__)
+
+
+def _run_all_checks(target_url: str) -> dict:
+    """
+    Menjalankan ketiga API secara paralel menggunakan ThreadPoolExecutor.
+    Mengembalikan dictionary berisi hasil dari masing-masing API.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        future_vt      = executor.submit(check_url_with_virustotal, target_url)
+        future_gsb     = executor.submit(check_url_with_google_safe_browsing, target_url)
+        future_urlscan = executor.submit(check_url_with_urlscan, target_url)
+
+        return {
+            "virustotal": future_vt.result(),
+            "gsb":        future_gsb.result(),
+            "urlscan":    future_urlscan.result(),
+        }
+
 
 @scan_bp.route('/scan', methods=['POST'])
 def scan_url():
     data = request.get_json()
-    
+
     # 1. Validasi Input
     if not data or 'url' not in data or not data['url'].strip():
         return jsonify({"success": False, "message": "URL wajib diisi"}), 400
-        
+
     target_url = data['url'].strip()
-    
+
     try:
         # 2. Cek Database Lokal Terlebih Dahulu (Caching Strategy)
         cached_result = ScannedURL.query.filter_by(url=target_url).first()
-        
+
         if cached_result:
             return jsonify({
                 "success": True,
@@ -32,44 +52,42 @@ def scan_url():
                 }
             }), 200
 
-        # 3. Cek dengan VirusTotal API (Tahap Pertama)
-        vt_result = check_url_with_virustotal(target_url)
+        # 3. Jalankan semua API secara paralel
+        api_results = _run_all_checks(target_url)
 
-        # Jika VirusTotal berhasil memberi keputusan (bukan error), gunakan hasilnya
-        if "error" not in vt_result:
-            status = vt_result["status"]
-            source = vt_result["source"]  # "VirusTotal API"
+        # 4. Evaluasi hasil: jika ADA SATU API yang menyatakan Phishing → langsung berbahaya
+        detected_by  = []   # daftar API yang mendeteksi ancaman
+        has_any_data = False  # minimal 1 API berhasil memberi keputusan
 
-            # 4. Simpan ke Database Lokal
-            new_scan = ScannedURL(url=target_url, status=status)
-            db.session.add(new_scan)
-            db.session.commit()
+        for api_name, result in api_results.items():
+            # Skip hasil error dan no_data (URLScan belum punya data URL ini)
+            if "error" in result or result.get("status") == "no_data":
+                continue
 
-            return jsonify({
-                "success": True,
-                "data": {
-                    "url": target_url,
-                    "status": status,
-                    "source": source,
-                    "checked_at": datetime.now(timezone.utc).isoformat()
-                }
-            }), 200
+            has_any_data = True  # ada API yang berhasil memberi data
 
-        # 5. Fallback: Jika VirusTotal error (rate-limit, timeout, URL belum ada),
-        #    gunakan Google Safe Browsing API
-        gsb_result = check_url_with_google_safe_browsing(target_url)
+            if result.get("status") == "Phishing":
+                detected_by.append(result.get("source", api_name))
 
-        if "error" in gsb_result:
-            # Kedua API gagal → kembalikan 502
+        # 5. Jika semua API gagal (error) → 502
+        if not has_any_data:
+            errors = [r.get("error", "unknown error") for r in api_results.values()
+                      if "error" in r]
             return jsonify({
                 "success": False,
-                "message": f"Semua API gagal. VirusTotal: {vt_result['error']}. Google: {gsb_result['error']}"
+                "message": f"Semua API gagal merespons: {'; '.join(errors)}"
             }), 502
 
-        status = gsb_result["status"]
+        # 6. Tentukan status akhir
+        final_status = "Phishing" if detected_by else "Aman"
+        source_label = (
+            f"Terdeteksi oleh: {', '.join(detected_by)}"
+            if detected_by
+            else "Google Safe Browsing API, VirusTotal API, URLScan.io"
+        )
 
-        # 6. Simpan hasil Google Safe Browsing ke Database Lokal
-        new_scan = ScannedURL(url=target_url, status=status)
+        # 7. Simpan ke Database Lokal
+        new_scan = ScannedURL(url=target_url, status=final_status)
         db.session.add(new_scan)
         db.session.commit()
 
@@ -77,8 +95,8 @@ def scan_url():
             "success": True,
             "data": {
                 "url": target_url,
-                "status": status,
-                "source": "Google Safe Browsing API",
+                "status": final_status,
+                "source": source_label,
                 "checked_at": datetime.now(timezone.utc).isoformat()
             }
         }), 200
@@ -91,13 +109,13 @@ def scan_url():
 @scan_bp.route('/stats', methods=['GET'])
 def get_stats():
     try:
-        total_scanned = ScannedURL.query.count()
+        total_scanned  = ScannedURL.query.count()
         total_phishing = ScannedURL.query.filter_by(status='Phishing').count()
-        
+
         return jsonify({
             "success": True,
             "data": {
-                "total_scanned_urls": total_scanned,
+                "total_scanned_urls":    total_scanned,
                 "total_phishing_detected": total_phishing
             }
         }), 200

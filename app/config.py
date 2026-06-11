@@ -23,3 +23,6 @@ class Config:
     
     # API Key VirusTotal
     VIRUSTOTAL_API_KEY = os.getenv('VIRUSTOTAL_API_KEY')
+
+    # API Key URLScan.io
+    URLSCAN_API_KEY = os.getenv('URLSCAN_API_KEY')
