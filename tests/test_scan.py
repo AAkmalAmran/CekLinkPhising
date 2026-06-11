@@ -4,8 +4,9 @@ from unittest.mock import patch
 from app.models import ScannedURL
 from app.database import db
 
-# Path mock yang benar: merujuk ke fungsi di dalam modul routes/scan.py
-MOCK_TARGET = 'app.routes.scan.check_url_with_google_safe_browsing'
+# Mock path untuk kedua API
+MOCK_VT  = 'app.routes.scan.check_url_with_virustotal'
+MOCK_GSB = 'app.routes.scan.check_url_with_google_safe_browsing'
 
 
 class TestScanEndpoint:
@@ -47,16 +48,16 @@ class TestScanEndpoint:
     # --- Caching: Data sudah ada di database ---
 
     def test_scan_returns_cached_result(self, client, app):
-        """URL yang sudah ada di DB harus dikembalikan dari cache, bukan dari API."""
+        """URL yang sudah ada di DB harus dikembalikan dari cache, kedua API tidak dipanggil."""
         with app.app_context():
             cached = ScannedURL(url='http://cached-phish.com', status='Phishing')
             db.session.add(cached)
             db.session.commit()
 
-        with patch(MOCK_TARGET) as mock_api:
+        with patch(MOCK_VT) as mock_vt, patch(MOCK_GSB) as mock_gsb:
             response = client.post('/api/v1/scan', json={'url': 'http://cached-phish.com'})
-            # Pastikan Google Safe Browsing API TIDAK dipanggil
-            mock_api.assert_not_called()
+            mock_vt.assert_not_called()
+            mock_gsb.assert_not_called()
 
         assert response.status_code == 200
         data = response.get_json()
@@ -71,7 +72,7 @@ class TestScanEndpoint:
             db.session.add(cached)
             db.session.commit()
 
-        with patch(MOCK_TARGET):
+        with patch(MOCK_VT), patch(MOCK_GSB):
             response = client.post('/api/v1/scan', json={'url': 'http://cached-safe.com'})
 
         data = response.get_json()
@@ -80,22 +81,47 @@ class TestScanEndpoint:
         assert 'source' in data['data']
         assert 'checked_at' in data['data']
 
-    # --- External API: Data belum ada di database ---
+    # --- VirusTotal API: Tahap Pertama ---
 
-    def test_scan_calls_gsb_when_not_cached(self, client):
-        """URL baru harus memanggil Google Safe Browsing API."""
-        with patch(MOCK_TARGET) as mock_api:
-            mock_api.return_value = {'status': 'Aman'}
-            response = client.post('/api/v1/scan', json={'url': 'http://url-baru.com'})
-            mock_api.assert_called_once_with('http://url-baru.com')
+    def test_scan_calls_virustotal_first(self, client):
+        """URL baru harus memanggil VirusTotal terlebih dahulu."""
+        with patch(MOCK_VT) as mock_vt, patch(MOCK_GSB) as mock_gsb:
+            mock_vt.return_value = {'status': 'Aman', 'source': 'VirusTotal API'}
+            response = client.post('/api/v1/scan', json={'url': 'http://url-baru-vt.com'})
+            mock_vt.assert_called_once_with('http://url-baru-vt.com')
+            mock_gsb.assert_not_called()  # GSB tidak perlu dipanggil jika VT berhasil
 
         assert response.status_code == 200
 
-    def test_scan_saves_result_to_db_after_api_call(self, client, app):
-        """Hasil dari Google Safe Browsing API harus disimpan ke database."""
-        url = 'http://save-to-db-test.com'
-        with patch(MOCK_TARGET) as mock_api:
-            mock_api.return_value = {'status': 'Phishing'}
+    def test_scan_phishing_detected_by_virustotal(self, client):
+        """URL phishing yang terdeteksi VirusTotal harus mengembalikan status 'Phishing'."""
+        with patch(MOCK_VT) as mock_vt, patch(MOCK_GSB):
+            mock_vt.return_value = {'status': 'Phishing', 'source': 'VirusTotal API'}
+            response = client.post('/api/v1/scan', json={'url': 'http://phishing-vt.com'})
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['success'] is True
+        assert data['data']['status'] == 'Phishing'
+        assert data['data']['source'] == 'VirusTotal API'
+
+    def test_scan_safe_url_via_virustotal(self, client):
+        """URL aman yang dikonfirmasi VirusTotal harus mengembalikan status 'Aman'."""
+        with patch(MOCK_VT) as mock_vt, patch(MOCK_GSB):
+            mock_vt.return_value = {'status': 'Aman', 'source': 'VirusTotal API'}
+            response = client.post('/api/v1/scan', json={'url': 'http://aman-vt.com'})
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['success'] is True
+        assert data['data']['status'] == 'Aman'
+        assert data['data']['source'] == 'VirusTotal API'
+
+    def test_scan_saves_result_after_virustotal(self, client, app):
+        """Hasil dari VirusTotal harus disimpan ke database."""
+        url = 'http://save-vt-to-db.com'
+        with patch(MOCK_VT) as mock_vt, patch(MOCK_GSB):
+            mock_vt.return_value = {'status': 'Phishing', 'source': 'VirusTotal API'}
             client.post('/api/v1/scan', json={'url': url})
 
         with app.app_context():
@@ -103,11 +129,27 @@ class TestScanEndpoint:
             assert saved is not None
             assert saved.status == 'Phishing'
 
-    def test_scan_phishing_url_via_api(self, client):
-        """URL phishing dari GSB harus mengembalikan status 'Phishing'."""
-        with patch(MOCK_TARGET) as mock_api:
-            mock_api.return_value = {'status': 'Phishing'}
-            response = client.post('/api/v1/scan', json={'url': 'http://phishing-baru.com'})
+    # --- Fallback ke Google Safe Browsing ---
+
+    def test_scan_falls_back_to_gsb_when_vt_errors(self, client):
+        """Jika VirusTotal error (rate-limit, timeout, dll), harus fallback ke GSB."""
+        with patch(MOCK_VT) as mock_vt, patch(MOCK_GSB) as mock_gsb:
+            mock_vt.return_value  = {'error': 'VirusTotal rate limit tercapai, coba lagi nanti'}
+            mock_gsb.return_value = {'status': 'Aman'}
+            response = client.post('/api/v1/scan', json={'url': 'http://fallback-gsb.com'})
+            mock_gsb.assert_called_once_with('http://fallback-gsb.com')
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['success'] is True
+        assert data['data']['source'] == 'Google Safe Browsing API'
+
+    def test_scan_phishing_detected_by_gsb_fallback(self, client):
+        """URL phishing yang terdeteksi GSB (setelah VT gagal) harus mengembalikan 'Phishing'."""
+        with patch(MOCK_VT) as mock_vt, patch(MOCK_GSB) as mock_gsb:
+            mock_vt.return_value  = {'error': 'URL belum pernah dianalisis oleh VirusTotal'}
+            mock_gsb.return_value = {'status': 'Phishing'}
+            response = client.post('/api/v1/scan', json={'url': 'http://phishing-gsb-fallback.com'})
 
         assert response.status_code == 200
         data = response.get_json()
@@ -115,31 +157,38 @@ class TestScanEndpoint:
         assert data['data']['status'] == 'Phishing'
         assert data['data']['source'] == 'Google Safe Browsing API'
 
-    def test_scan_safe_url_via_api(self, client):
-        """URL aman dari GSB harus mengembalikan status 'Aman'."""
-        with patch(MOCK_TARGET) as mock_api:
-            mock_api.return_value = {'status': 'Aman'}
-            response = client.post('/api/v1/scan', json={'url': 'http://aman-baru.com'})
+    def test_scan_saves_result_after_gsb_fallback(self, client, app):
+        """Hasil dari GSB (fallback) harus disimpan ke database."""
+        url = 'http://save-gsb-fallback-to-db.com'
+        with patch(MOCK_VT) as mock_vt, patch(MOCK_GSB) as mock_gsb:
+            mock_vt.return_value  = {'error': 'VirusTotal rate limit tercapai, coba lagi nanti'}
+            mock_gsb.return_value = {'status': 'Aman'}
+            client.post('/api/v1/scan', json={'url': url})
 
-        assert response.status_code == 200
-        data = response.get_json()
-        assert data['success'] is True
-        assert data['data']['status'] == 'Aman'
+        with app.app_context():
+            saved = ScannedURL.query.filter_by(url=url).first()
+            assert saved is not None
+            assert saved.status == 'Aman'
 
-    def test_scan_api_error_returns_502(self, client):
-        """Jika Google Safe Browsing API error, harus mengembalikan 502."""
-        with patch(MOCK_TARGET) as mock_api:
-            mock_api.return_value = {'error': 'Koneksi ke GSB gagal'}
-            response = client.post('/api/v1/scan', json={'url': 'http://error-url.com'})
+    # --- Semua API Gagal ---
+
+    def test_scan_returns_502_when_both_apis_fail(self, client):
+        """Jika kedua API error, harus mengembalikan 502."""
+        with patch(MOCK_VT) as mock_vt, patch(MOCK_GSB) as mock_gsb:
+            mock_vt.return_value  = {'error': 'VirusTotal timeout'}
+            mock_gsb.return_value = {'error': 'GSB timeout'}
+            response = client.post('/api/v1/scan', json={'url': 'http://both-api-fail.com'})
 
         assert response.status_code == 502
         data = response.get_json()
         assert data['success'] is False
 
+    # --- Struktur Respons ---
+
     def test_scan_response_has_checked_at_field(self, client):
         """Respons dari API harus memiliki field 'checked_at'."""
-        with patch(MOCK_TARGET) as mock_api:
-            mock_api.return_value = {'status': 'Aman'}
+        with patch(MOCK_VT) as mock_vt, patch(MOCK_GSB):
+            mock_vt.return_value = {'status': 'Aman', 'source': 'VirusTotal API'}
             response = client.post('/api/v1/scan', json={'url': 'http://cek-waktu.com'})
 
         data = response.get_json()

@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from app.database import db
 from app.models import ScannedURL
+from app.services.virustotal_api import check_url_with_virustotal
 from app.services.google_safe_browsing_api import check_url_with_google_safe_browsing
 from datetime import datetime, timezone
 
@@ -31,19 +32,47 @@ def scan_url():
                 }
             }), 200
 
-        # 3. Jika tidak ada di lokal, tembak Google Safe Browsing API
-        api_result = check_url_with_google_safe_browsing(target_url)
-        
-        if "error" in api_result:
-            return jsonify({"success": False, "message": api_result["error"]}), 502
-            
-        status = api_result["status"]
-        
-        # 4. Simpan hasil dari API ke Database Lokal
+        # 3. Cek dengan VirusTotal API (Tahap Pertama)
+        vt_result = check_url_with_virustotal(target_url)
+
+        # Jika VirusTotal berhasil memberi keputusan (bukan error), gunakan hasilnya
+        if "error" not in vt_result:
+            status = vt_result["status"]
+            source = vt_result["source"]  # "VirusTotal API"
+
+            # 4. Simpan ke Database Lokal
+            new_scan = ScannedURL(url=target_url, status=status)
+            db.session.add(new_scan)
+            db.session.commit()
+
+            return jsonify({
+                "success": True,
+                "data": {
+                    "url": target_url,
+                    "status": status,
+                    "source": source,
+                    "checked_at": datetime.now(timezone.utc).isoformat()
+                }
+            }), 200
+
+        # 5. Fallback: Jika VirusTotal error (rate-limit, timeout, URL belum ada),
+        #    gunakan Google Safe Browsing API
+        gsb_result = check_url_with_google_safe_browsing(target_url)
+
+        if "error" in gsb_result:
+            # Kedua API gagal → kembalikan 502
+            return jsonify({
+                "success": False,
+                "message": f"Semua API gagal. VirusTotal: {vt_result['error']}. Google: {gsb_result['error']}"
+            }), 502
+
+        status = gsb_result["status"]
+
+        # 6. Simpan hasil Google Safe Browsing ke Database Lokal
         new_scan = ScannedURL(url=target_url, status=status)
         db.session.add(new_scan)
         db.session.commit()
-        
+
         return jsonify({
             "success": True,
             "data": {
@@ -53,10 +82,11 @@ def scan_url():
                 "checked_at": datetime.now(timezone.utc).isoformat()
             }
         }), 200
-        
+
     except Exception as e:
         db.session.rollback()
         return jsonify({"success": False, "message": f"Terjadi kesalahan: {str(e)}"}), 500
+
 
 @scan_bp.route('/stats', methods=['GET'])
 def get_stats():

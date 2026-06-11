@@ -20,3 +20,6 @@ class Config:
     
     # API Key Google Safe Browsing
     GOOGLE_SAFE_BROWSING_API_KEY = os.getenv('GOOGLE_SAFE_BROWSING_API_KEY')
+    
+    # API Key VirusTotal
+    VIRUSTOTAL_API_KEY = os.getenv('VIRUSTOTAL_API_KEY')
