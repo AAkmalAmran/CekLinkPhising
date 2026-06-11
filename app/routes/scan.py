@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from app.database import db
 from app.models import ScannedURL
 from app.services.virustotal_api import check_url_with_virustotal
@@ -10,15 +10,24 @@ import concurrent.futures
 scan_bp = Blueprint('scan', __name__)
 
 
+def _run_with_context(app, func, *args, **kwargs):
+    """Membungkus eksekusi fungsi agar tetap memiliki Flask Application Context di dalam thread."""
+    with app.app_context():
+        return func(*args, **kwargs)
+
+
 def _run_all_checks(target_url: str) -> dict:
     """
     Menjalankan ketiga API secara paralel menggunakan ThreadPoolExecutor.
     Mengembalikan dictionary berisi hasil dari masing-masing API.
     """
+    # Ambil objek aplikasi sebenarnya sebelum masuk ke thread
+    app = current_app._get_current_object()
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        future_vt      = executor.submit(check_url_with_virustotal, target_url)
-        future_gsb     = executor.submit(check_url_with_google_safe_browsing, target_url)
-        future_urlscan = executor.submit(check_url_with_urlscan, target_url)
+        future_vt      = executor.submit(_run_with_context, app, check_url_with_virustotal, target_url)
+        future_gsb     = executor.submit(_run_with_context, app, check_url_with_google_safe_browsing, target_url)
+        future_urlscan = executor.submit(_run_with_context, app, check_url_with_urlscan, target_url)
 
         return {
             "virustotal": future_vt.result(),
