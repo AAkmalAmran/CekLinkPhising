@@ -4,6 +4,9 @@ from unittest.mock import patch
 from app.models import ScannedURL
 from app.database import db
 
+# Path mock yang benar: merujuk ke fungsi di dalam modul routes/scan.py
+MOCK_TARGET = 'app.routes.scan.check_url_with_google_safe_browsing'
+
 
 class TestScanEndpoint:
     """Test suite untuk endpoint POST /api/v1/scan"""
@@ -50,9 +53,9 @@ class TestScanEndpoint:
             db.session.add(cached)
             db.session.commit()
 
-        with patch('app.services.phishtank_api.check_url_with_phishtank') as mock_api:
+        with patch(MOCK_TARGET) as mock_api:
             response = client.post('/api/v1/scan', json={'url': 'http://cached-phish.com'})
-            # Pastikan API eksternal TIDAK dipanggil
+            # Pastikan Google Safe Browsing API TIDAK dipanggil
             mock_api.assert_not_called()
 
         assert response.status_code == 200
@@ -68,7 +71,7 @@ class TestScanEndpoint:
             db.session.add(cached)
             db.session.commit()
 
-        with patch('app.services.phishtank_api.check_url_with_phishtank'):
+        with patch(MOCK_TARGET):
             response = client.post('/api/v1/scan', json={'url': 'http://cached-safe.com'})
 
         data = response.get_json()
@@ -79,9 +82,9 @@ class TestScanEndpoint:
 
     # --- External API: Data belum ada di database ---
 
-    def test_scan_calls_phishtank_when_not_cached(self, client):
-        """URL baru harus memanggil PhishTank API."""
-        with patch('app.routes.scan.check_url_with_phishtank') as mock_api:
+    def test_scan_calls_gsb_when_not_cached(self, client):
+        """URL baru harus memanggil Google Safe Browsing API."""
+        with patch(MOCK_TARGET) as mock_api:
             mock_api.return_value = {'status': 'Aman'}
             response = client.post('/api/v1/scan', json={'url': 'http://url-baru.com'})
             mock_api.assert_called_once_with('http://url-baru.com')
@@ -89,9 +92,9 @@ class TestScanEndpoint:
         assert response.status_code == 200
 
     def test_scan_saves_result_to_db_after_api_call(self, client, app):
-        """Hasil dari PhishTank API harus disimpan ke database."""
+        """Hasil dari Google Safe Browsing API harus disimpan ke database."""
         url = 'http://save-to-db-test.com'
-        with patch('app.routes.scan.check_url_with_phishtank') as mock_api:
+        with patch(MOCK_TARGET) as mock_api:
             mock_api.return_value = {'status': 'Phishing'}
             client.post('/api/v1/scan', json={'url': url})
 
@@ -101,8 +104,8 @@ class TestScanEndpoint:
             assert saved.status == 'Phishing'
 
     def test_scan_phishing_url_via_api(self, client):
-        """URL phishing dari PhishTank harus mengembalikan status 'Phishing'."""
-        with patch('app.routes.scan.check_url_with_phishtank') as mock_api:
+        """URL phishing dari GSB harus mengembalikan status 'Phishing'."""
+        with patch(MOCK_TARGET) as mock_api:
             mock_api.return_value = {'status': 'Phishing'}
             response = client.post('/api/v1/scan', json={'url': 'http://phishing-baru.com'})
 
@@ -110,11 +113,11 @@ class TestScanEndpoint:
         data = response.get_json()
         assert data['success'] is True
         assert data['data']['status'] == 'Phishing'
-        assert data['data']['source'] == 'PhishTank API'
+        assert data['data']['source'] == 'Google Safe Browsing API'
 
     def test_scan_safe_url_via_api(self, client):
-        """URL aman dari PhishTank harus mengembalikan status 'Aman'."""
-        with patch('app.routes.scan.check_url_with_phishtank') as mock_api:
+        """URL aman dari GSB harus mengembalikan status 'Aman'."""
+        with patch(MOCK_TARGET) as mock_api:
             mock_api.return_value = {'status': 'Aman'}
             response = client.post('/api/v1/scan', json={'url': 'http://aman-baru.com'})
 
@@ -124,9 +127,9 @@ class TestScanEndpoint:
         assert data['data']['status'] == 'Aman'
 
     def test_scan_api_error_returns_502(self, client):
-        """Jika PhishTank API error, harus mengembalikan 502."""
-        with patch('app.routes.scan.check_url_with_phishtank') as mock_api:
-            mock_api.return_value = {'error': 'Koneksi ke PhishTank gagal'}
+        """Jika Google Safe Browsing API error, harus mengembalikan 502."""
+        with patch(MOCK_TARGET) as mock_api:
+            mock_api.return_value = {'error': 'Koneksi ke GSB gagal'}
             response = client.post('/api/v1/scan', json={'url': 'http://error-url.com'})
 
         assert response.status_code == 502
@@ -135,7 +138,7 @@ class TestScanEndpoint:
 
     def test_scan_response_has_checked_at_field(self, client):
         """Respons dari API harus memiliki field 'checked_at'."""
-        with patch('app.routes.scan.check_url_with_phishtank') as mock_api:
+        with patch(MOCK_TARGET) as mock_api:
             mock_api.return_value = {'status': 'Aman'}
             response = client.post('/api/v1/scan', json={'url': 'http://cek-waktu.com'})
 

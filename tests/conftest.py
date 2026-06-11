@@ -7,7 +7,10 @@ TEST_CONFIG = {
     'TESTING': True,
     'SQLALCHEMY_DATABASE_URI': 'sqlite:///:memory:',
     'SQLALCHEMY_TRACK_MODIFICATIONS': False,
+    # Override engine options: ssl_context hanya untuk pg8000/PostgreSQL, bukan SQLite
+    'SQLALCHEMY_ENGINE_OPTIONS': {},
     'PHISHTANK_API_KEY': None,
+    'GOOGLE_SAFE_BROWSING_API_KEY': 'fake-key-for-testing',
     'PROPAGATE_EXCEPTIONS': False,
 }
 

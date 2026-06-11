@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from app.database import db
 from app.models import ScannedURL
-from app.services.phishtank_api import check_url_with_phishtank
+from app.services.google_safe_browsing_api import check_url_with_google_safe_browsing
 from datetime import datetime, timezone
 
 scan_bp = Blueprint('scan', __name__)
@@ -17,7 +17,7 @@ def scan_url():
     target_url = data['url'].strip()
     
     try:
-        # 2. Cek Database Lokal Terlebih Dahulu (Caching)
+        # 2. Cek Database Lokal Terlebih Dahulu (Caching Strategy)
         cached_result = ScannedURL.query.filter_by(url=target_url).first()
         
         if cached_result:
@@ -31,8 +31,8 @@ def scan_url():
                 }
             }), 200
 
-        # 3. Jika tidak ada di lokal, tembak API Eksternal
-        api_result = check_url_with_phishtank(target_url)
+        # 3. Jika tidak ada di lokal, tembak Google Safe Browsing API
+        api_result = check_url_with_google_safe_browsing(target_url)
         
         if "error" in api_result:
             return jsonify({"success": False, "message": api_result["error"]}), 502
@@ -49,7 +49,7 @@ def scan_url():
             "data": {
                 "url": target_url,
                 "status": status,
-                "source": "PhishTank API",
+                "source": "Google Safe Browsing API",
                 "checked_at": datetime.now(timezone.utc).isoformat()
             }
         }), 200
